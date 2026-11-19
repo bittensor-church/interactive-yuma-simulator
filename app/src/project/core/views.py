@@ -266,6 +266,14 @@ def simulate_single_case_view(request):
     return HttpResponse(partial_html.data if partial_html else "No data", status=200)
 
 
+def _service_error(response) -> str:
+    """The explanation the metagraph service sends with an error, if it sent one."""
+    try:
+        return str(response.json().get("error") or "")
+    except (ValueError, AttributeError):
+        return ""
+
+
 @cache_successful_responses
 def metagraph_simulation_view(request):
     try:
@@ -326,7 +334,10 @@ def metagraph_simulation_view(request):
         )
     except HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            return _error_response(f"No metagraph data for timespan {start_date}–{end_date}", status=404)
+            return _error_response(
+                f"No metagraph data for timespan {start_date}–{end_date}. {_service_error(e.response)}".strip(),
+                status=404,
+            )
         if e.response is not None and e.response.status_code >= 500:
             return _error_response(
                 "Internal Server Error. "

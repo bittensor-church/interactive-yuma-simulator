@@ -316,9 +316,10 @@ if SENTRY_DSN := env("SENTRY_DSN", default=""):
 CRISPY_ALLOWED_TEMPLATE_PACKS = "bootstrap5"
 CRISPY_TEMPLATE_PACK = "bootstrap5"
 
+# Service that provides historical metagraph data (Sentinel Tower's metagraph data API):
+# its base URL and the bearer token issued for this app.
 MGRAPH_BASE_URL = os.environ.get("MGRAPH_BASE_URL", "")
-MGRAPH_USERNAME = os.environ.get("MGRAPH_USERNAME", "")
-MGRAPH_PASSWORD = os.environ.get("MGRAPH_PASSWORD", "")
+MGRAPH_API_TOKEN = os.environ.get("MGRAPH_API_TOKEN", "")
 # Seconds to wait for the metagraph service. Keep it below the gunicorn worker timeout
 # (GUNICORN_TIMEOUT, 180 s by default): otherwise the worker is killed before the view
 # can answer with a readable error.

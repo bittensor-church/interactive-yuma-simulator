@@ -1,12 +1,10 @@
 import logging
-import re
 from urllib.parse import urljoin
 from datetime import datetime
 
 import requests
 import pandas as pd
 from django.conf import settings
-from django.core.cache import cache
 
 UINT16_MAX = 65535.0
 ONE_MILLION = 1_000_000.0
@@ -24,55 +22,7 @@ def normalize(value: float, max_value: float) -> float:
         raise ValueError(f"Cannot normalize value={value} with max_value={max_value}")
 
 
-_CACHE_KEY = "metagraph_client_session"
-_LOGIN_PATH = "admin/login/"
-_LOGIN_TIMEOUT = 10
-
-
-def get_metagraph_session() -> requests.Session:
-    """
-    Return a logged‐in Session for the external Django service.
-    We cache it in Django’s cache so we only re-login once per hour.
-    """
-    sess = cache.get(_CACHE_KEY)
-    if sess:
-        return sess
-
-    sess = requests.Session()
-    login_url = urljoin(settings.MGRAPH_BASE_URL, _LOGIN_PATH)
-
-    r1 = sess.get(login_url, timeout=_LOGIN_TIMEOUT)
-    m = re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', r1.text)
-    if not m:
-        raise RuntimeError("Could not get CSRF token")
-    token = m.group(1)
-
-    resp = sess.post(
-        login_url,
-        data={
-            "csrfmiddlewaretoken": token,
-            "username": settings.MGRAPH_USERNAME,
-            "password": settings.MGRAPH_PASSWORD,
-            "next": "/admin/",
-        },
-        headers={"Referer": login_url},
-        timeout=_LOGIN_TIMEOUT,
-    )
-    resp.raise_for_status()
-    if "admin/" not in resp.url:
-        raise RuntimeError("Login failed")
-
-    # cache for an hour (or however long your external session lives)
-    cache.set(_CACHE_KEY, sess, 60 * 60)
-    return sess
-
-
-def _session_expired(response: requests.Response) -> bool:
-    """
-    The cached session can die before our own one-hour cache entry does (service restart,
-    shorter session lifetime). The service then redirects to its login page or rejects the call.
-    """
-    return response.status_code in (401, 403) or _LOGIN_PATH in response.url
+METAGRAPH_DATA_PATH = "api/v1/metagraph-data/"
 
 
 def fetch_metagraph_data(
@@ -80,7 +30,14 @@ def fetch_metagraph_data(
     end_date: datetime,
     netuid: int,
 ) -> dict:
-    url = urljoin(settings.MGRAPH_BASE_URL, "metagraph-data/")
+    """
+    Fetch per-epoch metagraph snapshots (hotkeys, stakes, weights, labels) from the metagraph
+    service. The service authenticates callers with a bearer token.
+    """
+    if not settings.MGRAPH_BASE_URL or not settings.MGRAPH_API_TOKEN:
+        raise RuntimeError("The metagraph service is not configured (MGRAPH_BASE_URL, MGRAPH_API_TOKEN).")
+
+    url = urljoin(settings.MGRAPH_BASE_URL.rstrip("/") + "/", METAGRAPH_DATA_PATH)
     params = {
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
@@ -88,15 +45,12 @@ def fetch_metagraph_data(
     }
 
     logger.debug("→ GET %s %r", url, params)
-    r = get_metagraph_session().get(url, params=params, timeout=settings.MGRAPH_TIMEOUT)
-
-    if _session_expired(r):
-        # log in again once instead of failing until the cached session expires
-        logger.info("metagraph session expired, logging in again")
-        cache.delete(_CACHE_KEY)
-        r = get_metagraph_session().get(url, params=params, timeout=settings.MGRAPH_TIMEOUT)
-        if _session_expired(r):
-            raise RuntimeError("The metagraph service rejected the login")
+    r = requests.get(
+        url,
+        params=params,
+        headers={"Authorization": f"Bearer {settings.MGRAPH_API_TOKEN}"},
+        timeout=settings.MGRAPH_TIMEOUT,
+    )
 
     if not r.ok:
         body = r.text
@@ -105,7 +59,7 @@ def fetch_metagraph_data(
         except ValueError:
             err = None
 
-        # response headers are not logged: they can carry session cookies
+        # response headers are not logged
         logger.error(
             "metagraph data fetch failed: %s %s\n"
             "Response body (first 500 chars):\n%s\n"
