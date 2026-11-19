@@ -589,6 +589,14 @@ form#simulationForm .form-check-inline {
           validForms && fetchAllCasesParallel()
         );
 
+        // Error text comes from the server or from exceptions and may echo request
+        // parameters, so it is escaped before it is put into innerHTML.
+        function escapeHtml(value) {
+          return String(value).replace(/[&<>"']/g, ch => ({
+            "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+          }[ch]));
+        }
+
         function parseCaseNumber(caseName) {
           const m = caseName.match(/^Case\s+(\d+)/i);
           return m ? parseInt(m[1],10) : 999999;
@@ -714,7 +722,7 @@ form#simulationForm .form-check-inline {
               const res = await fetch(url);
               if (!res.ok) {
                 const text = await res.text();
-                chartWrapper.innerHTML = `<div style="color:red;">${text}</div>`;
+                chartWrapper.innerHTML = `<div style="color:red; white-space:pre-wrap;">${escapeHtml(text)}</div>`;
                 return;
               }
 
@@ -732,7 +740,7 @@ form#simulationForm .form-check-inline {
                 showInvalid("id_miners_hotkeys", payload.errors.miners_hotkeys);
               }
             } catch (err) {
-              chartWrapper.innerHTML = `<div style="color:red;">Error: ${err.message}</div>`;
+              chartWrapper.innerHTML = `<div style="color:red;">Error: ${escapeHtml(err.message)}</div>`;
             }
 
           } else {
@@ -773,7 +781,7 @@ form#simulationForm .form-check-inline {
                     </div>`
                 }))
                 .catch(err => ({
-                  snippet: `<div style="color:red;">Error on '${caseName}': ${err.message}</div>`
+                  snippet: `<div style="color:red;">Error on '${escapeHtml(caseName)}': ${escapeHtml(err.message)}</div>`
                 }));
             });
 

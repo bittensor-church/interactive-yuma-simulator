@@ -4,15 +4,14 @@ import re
 import traceback
 from dataclasses import asdict
 from datetime import datetime, timedelta
-from functools import lru_cache
-from django.http import HttpResponseBadRequest
+from functools import wraps
 from django.conf import settings
 
 
 import pandas as pd
-from django.http import HttpResponse, HttpResponseServerError, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
-from django.views.decorators.cache import cache_control
+from django.utils.cache import add_never_cache_headers, patch_cache_control
 from requests.exceptions import HTTPError, Timeout
 from project.yuma_simulation._internal.cases import get_synthetic_cases, MetagraphCase
 from project.yuma_simulation._internal.yumas import SimulationHyperparameters, YumaParams, YumaSimulationNames
@@ -23,6 +22,39 @@ from .forms import SelectionForm, SimulationHyperparametersForm, YumaParamsForm
 from .utils import ONE_MILLION, UINT16_MAX, fetch_metagraph_data, normalize
 
 logger = logging.getLogger(__name__)
+
+RESULT_CACHE_SECONDS = 7 * 24 * 60 * 60
+
+
+def _error_response(message: str, status: int) -> HttpResponse:
+    """
+    Error responses echo request parameters, so they are sent as plain text:
+    as text/html the browser would render markup taken from the URL.
+    """
+    return HttpResponse(message, status=status, content_type="text/plain; charset=utf-8")
+
+
+def cache_successful_responses(view):
+    """
+    Let browsers and proxies cache simulation results, but only successful ones.
+    A failure (upstream timeout, missing data, bad parameter) must not stick for a week.
+    """
+
+    @wraps(view)
+    def wrapper(request, *args, **kwargs):
+        response = view(request, *args, **kwargs)
+        if response.status_code == 200:
+            patch_cache_control(
+                response,
+                public=True,
+                max_age=RESULT_CACHE_SECONDS,
+                s_maxage=RESULT_CACHE_SECONDS,
+            )
+        else:
+            add_never_cache_headers(response)
+        return response
+
+    return wrapper
 
 
 def simulation_view(request):
@@ -97,7 +129,7 @@ def simulation_view(request):
     return render(request, "simulator.html", context)
 
 
-@cache_control(public=True, max_age=604800, s_maxage=604800)
+@cache_successful_responses
 def simulate_single_case_view(request):
     """
     Returns HTML snippet for a single case simulation.
@@ -105,7 +137,7 @@ def simulate_single_case_view(request):
     """
     case_name = request.GET.get("case_name")
     if not case_name:
-        return HttpResponse("Missing 'case_name' parameter.", status=400)
+        return _error_response("Missing 'case_name' parameter.", status=400)
 
     try:
         raw_kappa = float(request.GET.get("kappa", 32767))
@@ -126,7 +158,7 @@ def simulate_single_case_view(request):
         js_charts = request.GET.get('jsCharts', '') == 'on'
 
     except ValueError as e:
-        return HttpResponse(f"Invalid parameter: {str(e)}", status=400)
+        return _error_response(f"Invalid parameter: {str(e)}", status=400)
 
     sim_params = SimulationHyperparameters(
         kappa=normalize(raw_kappa, UINT16_MAX),
@@ -151,7 +183,7 @@ def simulate_single_case_view(request):
     package_cases = get_synthetic_cases(use_full_matrices=True, reset_bonds=reset_bonds)
     chosen_case = next((c for c in package_cases if c.name == case_name), None)
     if not chosen_case:
-        return HttpResponse(f"Case '{case_name}' not found.", status=404)
+        return _error_response(f"Case '{case_name}' not found.", status=404)
 
     try:
         selected_yumas = [(chosen_yuma, yuma_params)]
@@ -164,12 +196,12 @@ def simulate_single_case_view(request):
     except Exception as e:
         traceback.print_exc()
         logger.exception("Error generating chart for case %r", case_name)
-        return HttpResponse(f"Error generating chart: {e}", status=500)
+        return _error_response(f"Error generating chart: {e}", status=500)
 
     return HttpResponse(partial_html.data if partial_html else "No data", status=200)
 
 
-@cache_control(public=True, max_age=604800, s_maxage=604800)
+@cache_successful_responses
 def metagraph_simulation_view(request):
     try:
         raw_kappa = float(request.GET.get("kappa", 32767))
@@ -196,7 +228,7 @@ def metagraph_simulation_view(request):
             start_date = datetime.fromisoformat(raw_start) if raw_start else None
             end_date   = datetime.fromisoformat(raw_end)   if raw_end   else None
         except ValueError:
-            return HttpResponseBadRequest("Dates must be in YYYY-MM-DD format.")
+            return _error_response("Dates must be in YYYY-MM-DD format.", status=400)
         netuid = int(request.GET.get("netuid", 0))
         requested_miners = [m.strip()
                     for m in request.GET.getlist("miners_hotkeys")
@@ -204,7 +236,7 @@ def metagraph_simulation_view(request):
 
         raw_alpha_tao = float(request.GET.get("alpha_tao_ratio", 0.1))
     except ValueError as e:
-        return HttpResponse(f"Invalid parameter: {e}", status=400)
+        return _error_response(f"Invalid parameter: {e}", status=400)
 
     sim_params = SimulationHyperparameters(
         kappa=normalize(raw_kappa, UINT16_MAX),
@@ -237,26 +269,22 @@ def metagraph_simulation_view(request):
             netuid=netuid,
         )
     except Timeout:
-        return HttpResponseServerError(
-            "The service timed out."
-            "Try requesting fewer epochs."
+        return _error_response(
+            "The service timed out. Try requesting fewer epochs.",
+            status=500,
         )
     except HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            return HttpResponse(f"No metagraph data for timespan {start_date}–{end_date}", status=404)
+            return _error_response(f"No metagraph data for timespan {start_date}–{end_date}", status=404)
         if e.response is not None and e.response.status_code >= 500:
-            html = """
-            <div class="alert alert-danger">
-              <strong>Internal Server Error</strong>
-              <ul class="mb-0">
-                <li>Make sure you’re querying historical metagraph data no older than 35 days ago.</li>
-              </ul>
-            </div>
-            """
-            return HttpResponse(html, status=500)
-        return HttpResponse(f"Error fetching metagraph data: {e}", status=400)
+            return _error_response(
+                "Internal Server Error. "
+                "Make sure you’re querying historical metagraph data no older than 35 days ago.",
+                status=500,
+            )
+        return _error_response(f"Error fetching metagraph data: {e}", status=400)
     except Exception as e:
-        return HttpResponse(f"Error fetching metagraph data: {e}", status=400)
+        return _error_response(f"Error fetching metagraph data: {e}", status=400)
 
     case_config = {}
     if shifted_validator_hotkey:
@@ -271,7 +299,7 @@ def metagraph_simulation_view(request):
             **case_config,
             )
     except ValueError as e:
-        return HttpResponse(str(e), status=400)
+        return _error_response(str(e), status=400)
 
     selection_form = SelectionForm(request.GET or None)
     for hotkey in invalid_miners:
