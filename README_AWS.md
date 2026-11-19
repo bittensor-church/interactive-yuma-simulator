@@ -129,11 +129,6 @@ In case you need to add confidential files (like a GCP credentials file) you can
 These will only be accessible to people that access to AWS or EC2 machines, not to people who have access to this repository.
 One such parameter, namely `/application/interactive_yuma_simulator/{env}/secret.env` is treated specially - if it exists (it doesn't by default) its contents are appended to `.env` during EC2 machine provisioning - this is a convenient way of supplying pieces of confidential information, like external systems' access keys to `.env`.
 
-## Vulnerability scanning
-If you set up your project with `vulnerabilities_scanning` enabled, you need to create an additional SSM parameter with the name `/application/interactive_yuma_simulator/{env}/.vuln.env` containing environment variables required by [vulnrelay](https://github.com/reef-technologies/vulnrelay) prior to deploying the project. Look at the `/envs/prod/.vuln.env.template` file to see the expected file format.
-
-For variable values, please refer to the [instructions in the internal handbook](https://github.com/reef-technologies/internal-handbook/blob/master/vuln_management.md)
-
 ## Deploying apps
 
 The docker containers are built with code you have locally, including any changes.
