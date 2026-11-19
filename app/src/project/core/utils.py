@@ -25,6 +25,8 @@ def normalize(value: float, max_value: float) -> float:
 
 
 _CACHE_KEY = "metagraph_client_session"
+_LOGIN_PATH = "admin/login/"
+_LOGIN_TIMEOUT = 10
 
 
 def get_metagraph_session() -> requests.Session:
@@ -37,9 +39,9 @@ def get_metagraph_session() -> requests.Session:
         return sess
 
     sess = requests.Session()
-    login_url = urljoin(settings.MGRAPH_BASE_URL, "admin/login/")
+    login_url = urljoin(settings.MGRAPH_BASE_URL, _LOGIN_PATH)
 
-    r1 = sess.get(login_url)
+    r1 = sess.get(login_url, timeout=_LOGIN_TIMEOUT)
     m = re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', r1.text)
     if not m:
         raise RuntimeError("Could not get CSRF token")
@@ -54,7 +56,7 @@ def get_metagraph_session() -> requests.Session:
             "next": "/admin/",
         },
         headers={"Referer": login_url},
-        timeout=10,
+        timeout=_LOGIN_TIMEOUT,
     )
     resp.raise_for_status()
     if "admin/" not in resp.url:
@@ -65,12 +67,19 @@ def get_metagraph_session() -> requests.Session:
     return sess
 
 
+def _session_expired(response: requests.Response) -> bool:
+    """
+    The cached session can die before our own one-hour cache entry does (service restart,
+    shorter session lifetime). The service then redirects to its login page or rejects the call.
+    """
+    return response.status_code in (401, 403) or _LOGIN_PATH in response.url
+
+
 def fetch_metagraph_data(
     start_date: datetime,
     end_date: datetime,
     netuid: int,
 ) -> dict:
-    sess = get_metagraph_session()
     url = urljoin(settings.MGRAPH_BASE_URL, "metagraph-data/")
     params = {
         "start_date": start_date.isoformat(),
@@ -79,24 +88,30 @@ def fetch_metagraph_data(
     }
 
     logger.debug("→ GET %s %r", url, params)
-    r = sess.get(url, params=params, timeout=360)
+    r = get_metagraph_session().get(url, params=params, timeout=settings.MGRAPH_TIMEOUT)
+
+    if _session_expired(r):
+        # log in again once instead of failing until the cached session expires
+        logger.info("metagraph session expired, logging in again")
+        cache.delete(_CACHE_KEY)
+        r = get_metagraph_session().get(url, params=params, timeout=settings.MGRAPH_TIMEOUT)
+        if _session_expired(r):
+            raise RuntimeError("The metagraph service rejected the login")
 
     if not r.ok:
-        headers = dict(r.headers)
         body = r.text
         try:
             err = r.json().get("error")
         except ValueError:
             err = None
 
+        # response headers are not logged: they can carry session cookies
         logger.error(
             "metagraph data fetch failed: %s %s\n"
-            "Response headers:\n%s\n"
             "Response body (first 500 chars):\n%s\n"
             "Parsed error: %r",
             r.status_code,
             r.reason,
-            headers,
             body[:500],
             err,
         )

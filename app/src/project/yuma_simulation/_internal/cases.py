@@ -167,6 +167,8 @@ class MetagraphCase(BaseCase):
 
         #TODO (somehow refactor to not rely on base case post init logic just to satisfy it)
         if not self.base_validator:
+            if not self.requested_validators:
+                raise ValueError("No active validators with enough stake in the selected timespan.")
             self.base_validator = self.requested_validators[0]
         self.validators = self.requested_validators
 

@@ -597,6 +597,25 @@ form#simulationForm .form-check-inline {
           }[ch]));
         }
 
+        // Each case request runs a simulation and renders charts on the server, so a large
+        // selection is fetched a few at a time instead of all at once.
+        const MAX_PARALLEL_CASE_REQUESTS = 3;
+
+        // Runs the task functions with at most `limit` in flight; results keep the task order.
+        async function runLimited(tasks, limit) {
+          const results = new Array(tasks.length);
+          let next = 0;
+          async function worker() {
+            while (next < tasks.length) {
+              const index = next++;
+              results[index] = await tasks[index]();
+            }
+          }
+          const workers = Array.from({ length: Math.min(limit, tasks.length) }, worker);
+          await Promise.all(workers);
+          return results;
+        }
+
         function parseCaseNumber(caseName) {
           const m = caseName.match(/^Case\s+(\d+)/i);
           return m ? parseInt(m[1],10) : 999999;
@@ -751,7 +770,7 @@ form#simulationForm .form-check-inline {
               return na - nb;
             });
 
-            const promises = sortedCases.map(caseName => {
+            const tasks = sortedCases.map(caseName => () => {
               const url = new URL(singleUrl, window.location.origin);
               url.searchParams.set("case_name",                   caseName);
               url.searchParams.set("kappa",                       simParams.kappa);
@@ -785,7 +804,7 @@ form#simulationForm .form-check-inline {
                 }));
             });
 
-            const results = await Promise.all(promises);
+            const results = await runLimited(tasks, MAX_PARALLEL_CASE_REQUESTS);
             chartWrapper.innerHTML = "";
             results.forEach(r => chartWrapper.insertAdjacentHTML("beforeend", r.snippet));
             updateDescriptionVisibility();

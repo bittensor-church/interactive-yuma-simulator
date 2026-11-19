@@ -10,6 +10,9 @@ from datetime import timezone as dt_timezone
 from project.yuma_simulation._internal.cases import cases
 from project.yuma_simulation._internal.yumas import YumaSimulationNames
 
+# Longest metagraph timespan a single simulation may cover.
+MAX_METAGRAPH_RANGE = timedelta(days=5)
+
 yumas_dict = asdict(YumaSimulationNames())
 
 # do not enable user to pick alpha version - it happens with a checkbox boolean
@@ -187,10 +190,10 @@ class SelectionForm(forms.Form):
             if end_utc > now_utc:
                 self.add_error("end_date", "End cannot be in the future.")
 
-            if end_utc > start_utc + timedelta(days=5):
+            if end_utc > start_utc + MAX_METAGRAPH_RANGE:
                 self.add_error(
                     "end_date",
-                    "End cannot be more than 5 days after start."
+                    f"End cannot be more than {MAX_METAGRAPH_RANGE.days} days after start."
                 )
 
             if end_utc < start_utc:

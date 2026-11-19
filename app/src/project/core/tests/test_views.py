@@ -42,13 +42,6 @@ def test__single_case__missing_case_name_is_a_plain_text_uncached_400():
     _assert_plain_text_and_not_cached(response)
 
 
-def test__single_case__unknown_yuma_version_is_a_plain_text_uncached_500():
-    response = _get({"case_name": cases[0].name, "chosen_yuma": MARKUP})
-
-    assert response.status_code == 500
-    _assert_plain_text_and_not_cached(response)
-
-
 def test__single_case__successful_simulation_is_html_and_publicly_cached():
     response = _get({"case_name": cases[0].name, "chosen_yuma": YumaSimulationNames().YUMA2})
 
@@ -59,3 +52,29 @@ def test__single_case__successful_simulation_is_html_and_publicly_cached():
     assert "public" in cache_control
     assert "max-age=604800" in cache_control
     assert "no-store" not in cache_control
+
+
+# --- parameter validation: single case ----------------------------------------------------
+
+
+def test__single_case__rejects_values_outside_the_form_limits():
+    for params in (
+        {"kappa": "nan"},
+        {"kappa": "inf"},
+        {"kappa": "70000"},
+        {"bond_penalty": "-1"},
+        {"bond_moving_avg": "1000001"},
+        {"alpha_tao_ratio": "-0.1"},
+        {"liquid_alpha_consensus_mode": "SOMETHING"},
+    ):
+        response = _get({"case_name": cases[0].name, **params})
+
+        assert response.status_code == 400, params
+        _assert_plain_text_and_not_cached(response)
+
+
+def test__single_case__unknown_yuma_version_is_rejected_before_simulating():
+    response = _get({"case_name": cases[0].name, "chosen_yuma": "Yuma 99"})
+
+    assert response.status_code == 400
+    _assert_plain_text_and_not_cached(response)

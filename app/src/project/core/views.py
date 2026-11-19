@@ -1,9 +1,9 @@
 import json
 import logging
+import math
 import re
-import traceback
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from django.conf import settings
 
@@ -18,7 +18,7 @@ from project.yuma_simulation._internal.yumas import SimulationHyperparameters, Y
 from project.yuma_simulation.v1 import api as yuma_api
 from project.yuma_simulation.v1.api import generate_chart_table, generate_metagraph_based_chart_table
 
-from .forms import SelectionForm, SimulationHyperparametersForm, YumaParamsForm
+from .forms import MAX_METAGRAPH_RANGE, SelectionForm, SimulationHyperparametersForm, YumaParamsForm
 from .utils import ONE_MILLION, UINT16_MAX, fetch_metagraph_data, normalize
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,89 @@ def simulation_view(request):
     return render(request, "simulator.html", context)
 
 
+class InvalidParameter(ValueError):
+    """A request parameter is missing, malformed or out of range."""
+
+
+YUMA_NAMES_BY_KEY: dict[str, str] = asdict(YumaSimulationNames())
+CONSENSUS_MODES = [value for value, _label in SimulationHyperparametersForm.base_fields["liquid_alpha_consensus_mode"].choices]
+
+
+def _float_param(request, name: str, default: float, *, min_value: float | None = None, max_value: float | None = None) -> float:
+    raw = request.GET.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise InvalidParameter(f"'{name}' must be a number.")
+    if not math.isfinite(value):
+        raise InvalidParameter(f"'{name}' must be a finite number.")
+    if min_value is not None and value < min_value:
+        raise InvalidParameter(f"'{name}' must be at least {min_value:g}.")
+    if max_value is not None and value > max_value:
+        raise InvalidParameter(f"'{name}' must be at most {max_value:g}.")
+    return value
+
+
+def _bool_param(request, name: str) -> bool:
+    return request.GET.get(name, "False") == "true"
+
+
+def _choice_param(request, name: str, default: str, choices) -> str:
+    value = request.GET.get(name, default)
+    if value not in choices:
+        raise InvalidParameter(f"'{name}' is not one of the supported values.")
+    return value
+
+
+def _datetime_param(request, name: str) -> datetime:
+    """Parse an ISO datetime; the result is naive and in UTC, like the values the form produces."""
+    raw = request.GET.get(name)
+    if not raw:
+        raise InvalidParameter(f"'{name}' is required.")
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        raise InvalidParameter(f"'{name}' must be an ISO date, e.g. 2025-01-31T12:00:00.")
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
+def _parse_hyperparameters(request) -> dict:
+    """
+    Limits mirror SimulationHyperparametersForm and YumaParamsForm: the page validates the
+    same values with those forms, but these endpoints can also be called directly.
+    """
+    return {
+        "kappa": _float_param(request, "kappa", 32767, min_value=0, max_value=UINT16_MAX),
+        "bond_penalty": _float_param(request, "bond_penalty", 65535, min_value=0, max_value=UINT16_MAX),
+        "liquid_alpha_consensus_mode": _choice_param(request, "liquid_alpha_consensus_mode", "CURRENT", CONSENSUS_MODES),
+        "alpha_tao_ratio": _float_param(request, "alpha_tao_ratio", 0.1, min_value=0),
+        "bond_moving_avg": _float_param(request, "bond_moving_avg", 900_000, min_value=0, max_value=ONE_MILLION),
+        "liquid_alpha": _bool_param(request, "liquid_alpha"),
+        "liquid_alpha_effective_weights": _bool_param(request, "liquid_alpha_effective_weights"),
+        "alpha_high": _float_param(request, "alpha_high", 0.3),
+        "alpha_low": _float_param(request, "alpha_low", 0.1),
+        "decay_rate": _float_param(request, "decay_rate", 0.1),
+        "capacity_alpha": _float_param(request, "capacity_alpha", 0.1),
+        "alpha_sigmoid_steepness": _float_param(request, "alpha_sigmoid_steepness", 10.0),
+    }
+
+
+def _yuma_kwargs(params: dict) -> dict:
+    return {
+        "bond_moving_avg": normalize(params["bond_moving_avg"], ONE_MILLION),
+        "liquid_alpha": params["liquid_alpha"],
+        "alpha_high": params["alpha_high"],
+        "alpha_low": params["alpha_low"],
+        "decay_rate": params["decay_rate"],
+        "capacity_alpha": params["capacity_alpha"],
+        "alpha_sigmoid_steepness": params["alpha_sigmoid_steepness"],
+    }
+
+
 @cache_successful_responses
 def simulate_single_case_view(request):
     """
@@ -140,43 +223,26 @@ def simulate_single_case_view(request):
         return _error_response("Missing 'case_name' parameter.", status=400)
 
     try:
-        raw_kappa = float(request.GET.get("kappa", 32767))
-        raw_bond_penalty = float(request.GET.get("bond_penalty", 65535))
-        reset_bonds = request.GET.get("reset_bonds", "False") == "true"
-        liquid_alpha_consensus_mode = request.GET.get("liquid_alpha_consensus_mode", "CURRENT")
-        liquid_alpha = request.GET.get("liquid_alpha", "False") == "true"
-        effective_weights = request.GET.get("liquid_alpha_effective_weights", "False") == "true"
+        params = _parse_hyperparameters(request)
+        # this endpoint takes the display name of the Yuma version, not its key
+        chosen_yuma = _choice_param(
+            request, "chosen_yuma", YUMA_NAMES_BY_KEY["YUMA2"], list(YUMA_NAMES_BY_KEY.values())
+        )
+    except InvalidParameter as e:
+        return _error_response(f"Invalid parameter: {e}", status=400)
 
-        chosen_yuma = request.GET.get("chosen_yuma", "YUMA")
-
-        raw_bond_moving_avg = float(request.GET.get("bond_moving_avg", 900_000))
-        alpha_high = float(request.GET.get("alpha_high", 0.3))
-        alpha_low = float(request.GET.get("alpha_low", 0.1))
-        decay_rate = float(request.GET.get("decay_rate", 0.1))
-        capacity_alpha = float(request.GET.get("capacity_alpha", 0.1))
-        alpha_sigmoid_steepness = float(request.GET.get("alpha_sigmoid_steepness", 10.0))
-        js_charts = request.GET.get('jsCharts', '') == 'on'
-
-    except ValueError as e:
-        return _error_response(f"Invalid parameter: {str(e)}", status=400)
+    reset_bonds = _bool_param(request, "reset_bonds")
+    js_charts = request.GET.get('jsCharts', '') == 'on'
 
     sim_params = SimulationHyperparameters(
-        kappa=normalize(raw_kappa, UINT16_MAX),
-        bond_penalty=normalize(raw_bond_penalty, UINT16_MAX),
-        liquid_alpha_consensus_mode=liquid_alpha_consensus_mode,
+        kappa=normalize(params["kappa"], UINT16_MAX),
+        bond_penalty=normalize(params["bond_penalty"], UINT16_MAX),
+        liquid_alpha_consensus_mode=params["liquid_alpha_consensus_mode"],
     )
 
-    yuma_kwargs = {
-        "bond_moving_avg":             normalize(raw_bond_moving_avg, ONE_MILLION),
-        "liquid_alpha":                liquid_alpha,
-        "alpha_high":                  alpha_high,
-        "alpha_low":                   alpha_low,
-        "decay_rate":                  decay_rate,
-        "capacity_alpha":              capacity_alpha,
-        "alpha_sigmoid_steepness":     alpha_sigmoid_steepness,
-    }
+    yuma_kwargs = _yuma_kwargs(params)
     if chosen_yuma.startswith("YUMA3"):
-        yuma_kwargs["liquid_alpha_effective_weights"] = effective_weights
+        yuma_kwargs["liquid_alpha_effective_weights"] = params["liquid_alpha_effective_weights"]
 
     yuma_params = YumaParams(**yuma_kwargs)
 
@@ -194,7 +260,6 @@ def simulate_single_case_view(request):
             engine='plotly' if js_charts else 'matplotlib',
         )
     except Exception as e:
-        traceback.print_exc()
         logger.exception("Error generating chart for case %r", case_name)
         return _error_response(f"Error generating chart: {e}", status=500)
 
@@ -204,59 +269,45 @@ def simulate_single_case_view(request):
 @cache_successful_responses
 def metagraph_simulation_view(request):
     try:
-        raw_kappa = float(request.GET.get("kappa", 32767))
-        raw_bond_penalty = float(request.GET.get("bond_penalty", 65535))
-        lam = request.GET.get("liquid_alpha_consensus_mode", "CURRENT")
-        liq_alpha = request.GET.get("liquid_alpha", "False") == "true"
-        chosen_yuma = request.GET.get("selected_yumas", "YUMA")
-        effective_weights = request.GET.get("liquid_alpha_effective_weights", "False") == "true"
+        params = _parse_hyperparameters(request)
+        chosen_yuma = _choice_param(request, "selected_yumas", "YUMA2", list(YUMA_NAMES_BY_KEY))
 
-
-        raw_bma = float(request.GET.get("bond_moving_avg", 900_000))
-        alpha_high = float(request.GET.get("alpha_high", 0.3))
-        alpha_low = float(request.GET.get("alpha_low", 0.1))
-        decay_rate = float(request.GET.get("decay_rate", 0.1))
-        cap_alpha = float(request.GET.get("capacity_alpha", 0.1))
-        steepness = float(request.GET.get("alpha_sigmoid_steepness", 10.0))
-
-        raw_start = request.GET.get("start_date")
-        raw_end   = request.GET.get("end_date")
-        js_charts = request.GET.get('jsCharts', '') == 'on'
-        shifted_validator_hotkey = request.GET.get('shifted_validator_hotkey', '')
+        # same rules as SelectionForm.clean()
+        start_date = _datetime_param(request, "start_date")
+        end_date = _datetime_param(request, "end_date")
+        now = datetime.now(UTC).replace(tzinfo=None)
+        if end_date < start_date:
+            raise InvalidParameter("'end_date' cannot be before 'start_date'.")
+        if end_date > now:
+            raise InvalidParameter("'end_date' cannot be in the future.")
+        if end_date > start_date + MAX_METAGRAPH_RANGE:
+            raise InvalidParameter(
+                f"'end_date' cannot be more than {MAX_METAGRAPH_RANGE.days} days after 'start_date'."
+            )
 
         try:
-            start_date = datetime.fromisoformat(raw_start) if raw_start else None
-            end_date   = datetime.fromisoformat(raw_end)   if raw_end   else None
+            netuid = int(request.GET.get("netuid", 0))
         except ValueError:
-            return _error_response("Dates must be in YYYY-MM-DD format.", status=400)
-        netuid = int(request.GET.get("netuid", 0))
-        requested_miners = [m.strip()
-                    for m in request.GET.getlist("miners_hotkeys")
-                    if m.strip()]
-
-        raw_alpha_tao = float(request.GET.get("alpha_tao_ratio", 0.1))
-    except ValueError as e:
+            raise InvalidParameter("'netuid' must be an integer.")
+        if netuid < 0:
+            raise InvalidParameter("'netuid' must not be negative.")
+    except InvalidParameter as e:
         return _error_response(f"Invalid parameter: {e}", status=400)
 
+    js_charts = request.GET.get('jsCharts', '') == 'on'
+    shifted_validator_hotkey = request.GET.get('shifted_validator_hotkey', '')
+    requested_miners = [m.strip() for m in request.GET.getlist("miners_hotkeys") if m.strip()]
+
     sim_params = SimulationHyperparameters(
-        kappa=normalize(raw_kappa, UINT16_MAX),
-        bond_penalty=normalize(raw_bond_penalty, UINT16_MAX),
-        liquid_alpha_consensus_mode=lam,
-        alpha_tao_ratio=raw_alpha_tao,
+        kappa=normalize(params["kappa"], UINT16_MAX),
+        bond_penalty=normalize(params["bond_penalty"], UINT16_MAX),
+        liquid_alpha_consensus_mode=params["liquid_alpha_consensus_mode"],
+        alpha_tao_ratio=params["alpha_tao_ratio"],
     )
 
-    mg_yuma_kwargs = {
-        "bond_moving_avg":             normalize(raw_bma, ONE_MILLION),
-        "liquid_alpha":                liq_alpha,
-        "alpha_high":                  alpha_high,
-        "alpha_low":                   alpha_low,
-        "decay_rate":                  decay_rate,
-        "capacity_alpha":              cap_alpha,
-        "alpha_sigmoid_steepness":     steepness,
-    }
-
+    mg_yuma_kwargs = _yuma_kwargs(params)
     if chosen_yuma.startswith("YUMA3"):
-        mg_yuma_kwargs["liquid_alpha_effective_weights"] = effective_weights
+        mg_yuma_kwargs["liquid_alpha_effective_weights"] = params["liquid_alpha_effective_weights"]
 
     yuma_params = YumaParams(**mg_yuma_kwargs)
 
@@ -284,6 +335,7 @@ def metagraph_simulation_view(request):
             )
         return _error_response(f"Error fetching metagraph data: {e}", status=400)
     except Exception as e:
+        logger.exception("Error fetching metagraph data")
         return _error_response(f"Error fetching metagraph data: {e}", status=400)
 
     case_config = {}
@@ -300,6 +352,10 @@ def metagraph_simulation_view(request):
             )
     except ValueError as e:
         return _error_response(str(e), status=400)
+    except (KeyError, IndexError, TypeError):
+        # the metagraph service answered, but not with the structure the simulation expects
+        logger.exception("Unexpected metagraph data for netuid %s", netuid)
+        return _error_response("The metagraph data for this timespan could not be processed.", status=500)
 
     selection_form = SelectionForm(request.GET or None)
     for hotkey in invalid_miners:
@@ -308,22 +364,26 @@ def metagraph_simulation_view(request):
             f"Invalid miner hotkey: {hotkey}"
         )
 
-    selected_chart_yumas = [(asdict(YumaSimulationNames())[chosen_yuma], yuma_params)]
-    all_yumas = list(asdict(YumaSimulationNames()).values())
+    selected_chart_yumas = [(YUMA_NAMES_BY_KEY[chosen_yuma], yuma_params)]
+    all_yumas = list(YUMA_NAMES_BY_KEY.values())
     summary_versions = [
         (display_name, yuma_params)
         for display_name in all_yumas
         if display_name not in ("Yuma 1", "Yuma 3 (Rhef+relative bonds)")
     ]
 
-    partial_html = generate_metagraph_based_chart_table(
-        chart_versions=selected_chart_yumas,
-        summary_versions=summary_versions,
-        normal_case=case,
-        yuma_hyperparameters=sim_params,
-        epochs_padding=epochs_padding,
-        engine='plotly' if js_charts else 'matplotlib',
-    )
+    try:
+        partial_html = generate_metagraph_based_chart_table(
+            chart_versions=selected_chart_yumas,
+            summary_versions=summary_versions,
+            normal_case=case,
+            yuma_hyperparameters=sim_params,
+            epochs_padding=epochs_padding,
+            engine='plotly' if js_charts else 'matplotlib',
+        )
+    except Exception as e:
+        logger.exception("Error generating metagraph charts for netuid %s", netuid)
+        return _error_response(f"Error generating chart: {e}", status=500)
 
     return JsonResponse(
         {
