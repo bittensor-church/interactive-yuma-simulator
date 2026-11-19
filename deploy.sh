@@ -19,10 +19,13 @@ docker compose pull --ignore-buildable
 # collect static files to external storage while old app is still running
 # docker compose run --rm app sh -c "python manage.py collectstatic --no-input"
 
-# gather list of services, excluding the ones we don’t want
+# gather the services to stop: everything defined in docker-compose.yml except db and redis.
+# Read them from the compose file, not from `docker compose ps`: `ps` also lists containers of
+# services that were removed from the file, and `docker compose stop` fails on those
+# (they are dropped by `up -d --remove-orphans` below).
 SERVICES=$(
-  docker compose ps --services 2>/dev/null \
-    | grep -v -e 'is not set' -e db -e redis \
+  docker compose config --services 2>/dev/null \
+    | grep -v -x -e db -e redis \
     || true
 )
 
