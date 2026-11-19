@@ -319,6 +319,10 @@ CRISPY_TEMPLATE_PACK = "bootstrap5"
 MGRAPH_BASE_URL = os.environ.get("MGRAPH_BASE_URL", "")
 MGRAPH_USERNAME = os.environ.get("MGRAPH_USERNAME", "")
 MGRAPH_PASSWORD = os.environ.get("MGRAPH_PASSWORD", "")
+# Seconds to wait for the metagraph service. Keep it below the gunicorn worker timeout
+# (GUNICORN_TIMEOUT, 180 s by default): otherwise the worker is killed before the view
+# can answer with a readable error.
+MGRAPH_TIMEOUT = env.int("MGRAPH_TIMEOUT", default=150)
 
 EPOCHS_PADDING = os.environ.get("EPOCHS_PADDING", "10")
 ENABLE_METAGRAPH_DIAGNOSTICS = env.bool("ENABLE_METAGRAPH_DIAGNOSTICS", default=False)
