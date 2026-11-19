@@ -169,3 +169,30 @@ def test__fetch__uses_the_configured_timeout(monkeypatch, settings):
     utils.fetch_metagraph_data(start_date=_now(), end_date=_now(), netuid=1)
 
     assert session.get.call_args.kwargs["timeout"] == 42
+
+
+# --- summary table ---------------------------------------------------------------------------
+
+
+def test__metagraph__summary_leaves_out_yuma1_and_plain_yuma3(fetch, monkeypatch):
+    from project.yuma_simulation._internal.yumas import YumaSimulationNames
+
+    names = YumaSimulationNames()
+    fetch.side_effect = None
+    fetch.return_value = {}
+    monkeypatch.setattr(
+        views.MetagraphCase, "from_mg_dumper_data", classmethod(lambda cls, **kwargs: (mock.Mock(), []))
+    )
+    chart_table = mock.Mock(return_value=mock.Mock(data="<div></div>"))
+    monkeypatch.setattr(views, "generate_metagraph_based_chart_table", chart_table)
+
+    response = _get({**_valid_params(), "selected_yumas": "YUMA1"})
+
+    assert response.status_code == 200
+    summary_names = [name for name, _params in chart_table.call_args.kwargs["summary_versions"]]
+    assert names.YUMA1 not in summary_names
+    assert names.YUMA3 not in summary_names
+    assert names.YUMA2 in summary_names
+    assert names.YUMA3_LIQUID in summary_names
+    # the version picked for the charts is still charted, even when it is not in the summary
+    assert [name for name, _params in chart_table.call_args.kwargs["chart_versions"]] == [names.YUMA1]

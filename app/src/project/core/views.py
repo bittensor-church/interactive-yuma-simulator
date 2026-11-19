@@ -134,6 +134,10 @@ class InvalidParameter(ValueError):
 
 
 YUMA_NAMES_BY_KEY: dict[str, str] = asdict(YumaSimulationNames())
+# Yuma 3 variants, by display name; only they take `liquid_alpha_effective_weights`.
+YUMA3_NAMES = (YUMA_NAMES_BY_KEY["YUMA3"], YUMA_NAMES_BY_KEY["YUMA3_LIQUID"])
+# Versions left out of the metagraph summary table.
+SUMMARY_EXCLUDED_NAMES = (YUMA_NAMES_BY_KEY["YUMA1"], YUMA_NAMES_BY_KEY["YUMA3"])
 CONSENSUS_MODES = [value for value, _label in SimulationHyperparametersForm.base_fields["liquid_alpha_consensus_mode"].choices]
 
 
@@ -241,7 +245,7 @@ def simulate_single_case_view(request):
     )
 
     yuma_kwargs = _yuma_kwargs(params)
-    if chosen_yuma.startswith("YUMA3"):
+    if chosen_yuma in YUMA3_NAMES:
         yuma_kwargs["liquid_alpha_effective_weights"] = params["liquid_alpha_effective_weights"]
 
     yuma_params = YumaParams(**yuma_kwargs)
@@ -369,7 +373,7 @@ def metagraph_simulation_view(request):
     summary_versions = [
         (display_name, yuma_params)
         for display_name in all_yumas
-        if display_name not in ("Yuma 1", "Yuma 3 (Rhef+relative bonds)")
+        if display_name not in SUMMARY_EXCLUDED_NAMES
     ]
 
     try:
