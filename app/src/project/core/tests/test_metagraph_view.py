@@ -121,51 +121,69 @@ def test__metagraph__malformed_service_data_is_a_500_not_a_crash(fetch):
 # --- metagraph service client ---------------------------------------------------------------
 
 
-def _service_response(status: int = 200, url: str = "https://mg.example/metagraph-data/", payload=None):
+def _service_response(status: int = 200, payload=None):
     response = mock.Mock(spec=requests.Response)
     response.status_code = status
     response.ok = status < 400
-    response.url = url
     response.reason = "reason"
     response.text = ""
     response.json.return_value = payload if payload is not None else {}
     return response
 
 
-def test__fetch__logs_in_again_when_the_cached_session_has_expired(monkeypatch, settings):
-    settings.MGRAPH_BASE_URL = "https://mg.example/"
-    expired = mock.Mock()
-    expired.get.return_value = _service_response(url="https://mg.example/admin/login/?next=/metagraph-data/")
-    fresh = mock.Mock()
-    fresh.get.return_value = _service_response(payload={"blocks": []})
-    get_session = mock.Mock(side_effect=[expired, fresh])
-    monkeypatch.setattr(utils, "get_metagraph_session", get_session)
+@pytest.fixture
+def service(monkeypatch, settings):
+    """A configured metagraph service whose HTTP calls are captured."""
+    settings.MGRAPH_BASE_URL = "https://mg.example"
+    settings.MGRAPH_API_TOKEN = "service-token"  # noqa: S105 - a fixture value, not a secret
+    settings.MGRAPH_TIMEOUT = 42
+    get = mock.Mock(return_value=_service_response(payload={"blocks": []}))
+    monkeypatch.setattr(utils.requests, "get", get)
+    return get
 
-    data = utils.fetch_metagraph_data(start_date=_now(), end_date=_now(), netuid=1)
+
+def test__fetch__calls_the_data_api_with_the_bearer_token_and_timeout(service):
+    start = datetime(2026, 1, 1, 12, 0)
+    end = datetime(2026, 1, 2, 12, 0)
+
+    data = utils.fetch_metagraph_data(start_date=start, end_date=end, netuid=7)
 
     assert data == {"blocks": []}
-    assert get_session.call_count == 2
+    service.assert_called_once_with(
+        "https://mg.example/api/v1/metagraph-data/",
+        params={"start_date": "2026-01-01T12:00:00", "end_date": "2026-01-02T12:00:00", "netuid": 7},
+        headers={"Authorization": "Bearer service-token"},
+        timeout=42,
+    )
 
 
-def test__fetch__gives_up_when_a_fresh_login_is_rejected_too(monkeypatch, settings):
-    settings.MGRAPH_BASE_URL = "https://mg.example/"
-    rejected = mock.Mock()
-    rejected.get.return_value = _service_response(status=403)
-    monkeypatch.setattr(utils, "get_metagraph_session", mock.Mock(return_value=rejected))
+@pytest.mark.parametrize("status", [401, 404, 500])
+def test__fetch__raises_an_http_error_for_an_error_response(service, status):
+    service.return_value = _service_response(status=status, payload={"error": "nope"})
+
+    with pytest.raises(requests.HTTPError) as error:
+        utils.fetch_metagraph_data(start_date=_now(), end_date=_now(), netuid=1)
+
+    assert error.value.response.status_code == status
+
+
+@pytest.mark.parametrize("missing", ["MGRAPH_BASE_URL", "MGRAPH_API_TOKEN"])
+def test__fetch__without_configuration_does_not_call_anything(service, settings, missing):
+    setattr(settings, missing, "")
 
     with pytest.raises(RuntimeError):
         utils.fetch_metagraph_data(start_date=_now(), end_date=_now(), netuid=1)
 
-    assert rejected.get.call_count == 2
+    service.assert_not_called()
 
 
-def test__fetch__uses_the_configured_timeout(monkeypatch, settings):
-    settings.MGRAPH_BASE_URL = "https://mg.example/"
-    settings.MGRAPH_TIMEOUT = 42
-    session = mock.Mock()
-    session.get.return_value = _service_response(payload={})
-    monkeypatch.setattr(utils, "get_metagraph_session", mock.Mock(return_value=session))
+def test__metagraph__no_data_answer_includes_the_services_explanation(fetch):
+    fetch.side_effect = requests.HTTPError(
+        "404 Not Found", response=_service_response(status=404, payload={"error": "No weights are stored."})
+    )
 
-    utils.fetch_metagraph_data(start_date=_now(), end_date=_now(), netuid=1)
+    response = _get(_valid_params())
 
-    assert session.get.call_args.kwargs["timeout"] == 42
+    assert response.status_code == 404
+    assert "No weights are stored." in response.content.decode()
+    _assert_plain_text_and_not_cached(response)
