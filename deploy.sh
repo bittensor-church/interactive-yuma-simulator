@@ -50,3 +50,7 @@ docker compose up -d --remove-orphans
 docker images --quiet --filter=dangling=true \
     | xargs --no-run-if-empty docker rmi \
     || true
+
+# Drop build cache that no build has used for a week; otherwise every dependency rebuild
+# leaves its layers behind until the disk fills up
+docker builder prune -f --filter "until=168h" || true
