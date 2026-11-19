@@ -78,3 +78,55 @@ def test__single_case__unknown_yuma_version_is_rejected_before_simulating():
 
     assert response.status_code == 400
     _assert_plain_text_and_not_cached(response)
+
+
+# --- Yuma 3 options --------------------------------------------------------------------
+
+
+def _captured_yuma_params(monkeypatch, params: dict[str, str]):
+    """Run the view with chart generation replaced; return the YumaParams it was called with."""
+    from unittest import mock
+
+    from project.core import views
+
+    fake = mock.Mock(return_value=mock.Mock(data="<div></div>"))
+    monkeypatch.setattr(views, "generate_chart_table", fake)
+
+    response = _get({"case_name": cases[0].name, **params})
+
+    assert response.status_code == 200
+    ((_name, yuma_params),) = fake.call_args.kwargs["yuma_versions"]
+    return yuma_params
+
+
+def test__single_case__effective_weights_option_reaches_yuma3(monkeypatch):
+    names = YumaSimulationNames()
+
+    for yuma3_name in (names.YUMA3, names.YUMA3_LIQUID):
+        on = _captured_yuma_params(monkeypatch, {"chosen_yuma": yuma3_name, "liquid_alpha_effective_weights": "true"})
+        off = _captured_yuma_params(monkeypatch, {"chosen_yuma": yuma3_name, "liquid_alpha_effective_weights": "false"})
+
+        assert on.liquid_alpha_effective_weights is True
+        assert off.liquid_alpha_effective_weights is False
+
+
+def test__single_case__effective_weights_option_is_not_passed_to_other_versions(monkeypatch):
+    yuma_params = _captured_yuma_params(
+        monkeypatch, {"chosen_yuma": YumaSimulationNames().YUMA2, "liquid_alpha_effective_weights": "true"}
+    )
+
+    assert yuma_params.liquid_alpha_effective_weights is False
+
+
+def test__single_case__yuma3_liquid_alpha_with_effective_weights_runs():
+    response = _get(
+        {
+            "case_name": cases[0].name,
+            "chosen_yuma": YumaSimulationNames().YUMA3_LIQUID,
+            "liquid_alpha": "true",
+            "liquid_alpha_effective_weights": "true",
+        }
+    )
+
+    assert response.status_code == 200
+    assert "<img" in response.content.decode()
