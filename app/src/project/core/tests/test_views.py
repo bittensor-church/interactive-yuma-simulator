@@ -95,7 +95,7 @@ def _captured_yuma_params(monkeypatch, params: dict[str, str]):
     response = _get({"case_name": cases[0].name, **params})
 
     assert response.status_code == 200
-    (_name, yuma_params), = fake.call_args.kwargs["yuma_versions"]
+    ((_name, yuma_params),) = fake.call_args.kwargs["yuma_versions"]
     return yuma_params
 
 
@@ -103,12 +103,8 @@ def test__single_case__effective_weights_option_reaches_yuma3(monkeypatch):
     names = YumaSimulationNames()
 
     for yuma3_name in (names.YUMA3, names.YUMA3_LIQUID):
-        on = _captured_yuma_params(
-            monkeypatch, {"chosen_yuma": yuma3_name, "liquid_alpha_effective_weights": "true"}
-        )
-        off = _captured_yuma_params(
-            monkeypatch, {"chosen_yuma": yuma3_name, "liquid_alpha_effective_weights": "false"}
-        )
+        on = _captured_yuma_params(monkeypatch, {"chosen_yuma": yuma3_name, "liquid_alpha_effective_weights": "true"})
+        off = _captured_yuma_params(monkeypatch, {"chosen_yuma": yuma3_name, "liquid_alpha_effective_weights": "false"})
 
         assert on.liquid_alpha_effective_weights is True
         assert off.liquid_alpha_effective_weights is False
