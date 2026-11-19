@@ -78,7 +78,7 @@ services:
 
 
   nginx:
-    image: 'ghcr.io/reef-technologies/nginx-rt:v1.2.2'
+    image: 'ghcr.io/reef-technologies/nginx-rt:v1.4.1'
     restart: unless-stopped
     healthcheck:
       test: [

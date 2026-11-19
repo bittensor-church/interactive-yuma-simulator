@@ -47,7 +47,7 @@ services:
 
 
   nginx:
-    image: 'ghcr.io/reef-technologies/nginx-rt:v1.2.2'
+    image: 'ghcr.io/reef-technologies/nginx-rt:v1.4.1'
     restart: unless-stopped
     healthcheck:
       test: wget -q --spider http://0.0.0.0:8000/admin/login/ || exit 1
