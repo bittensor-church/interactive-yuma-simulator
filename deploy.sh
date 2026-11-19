@@ -7,7 +7,10 @@ if [ ! -f ".env" ]; then
     exit 1;
 fi
 
-docker compose build --build-arg DEPLOY_SHA=$DEPLOY_SHA
+# --pull refreshes base images, so rebuilt images pick up fixed CA bundles
+docker compose build --pull --build-arg DEPLOY_SHA=$DEPLOY_SHA
+# refresh images that are not built locally (db, redis, nginx)
+docker compose pull --ignore-buildable
 
 # Tag the first image from multi-stage app Dockerfile to mark it as not dangling
 #BASE_IMAGE=$(docker images --quiet --filter="label=builder=true" | head -n1)
@@ -37,8 +40,8 @@ docker compose up -d db  # in case it hasn't been launched before
 # start the app container only in order to perform migrations
 docker compose run --rm app sh -c "python manage.py wait_for_database --timeout 10; python manage.py migrate"
 
-# start everything
-docker compose up -d
+# start everything; drop containers of services removed from docker-compose.yml
+docker compose up -d --remove-orphans
 
 # Clean all dangling images
 docker images --quiet --filter=dangling=true \
