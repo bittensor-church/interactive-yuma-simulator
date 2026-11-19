@@ -34,7 +34,8 @@ RUN chmod +x /root/src/entrypoint.sh \
 RUN --mount=type=cache,target=/root/.cache/uv \
   uv sync --frozen --no-dev --no-editable
 
-RUN ENV=prod ENV_FILL_MISSING_VALUES=1 SECRET_KEY=dummy uv run python3 manage.py collectstatic --no-input --clear
+# --no-dev: a plain `uv run` would install the dev group (mypy, ruff, pytest) into the production venv
+RUN ENV=prod ENV_FILL_MISSING_VALUES=1 SECRET_KEY=dummy uv run --frozen --no-dev python3 manage.py collectstatic --no-input --clear
 
 
 FROM $BASE_IMAGE AS secondary-image
